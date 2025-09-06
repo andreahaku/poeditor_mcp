@@ -30,12 +30,13 @@ The **POEditor Integration Studio** is a comprehensive MCP (Model Context Protoc
 
 ### Core Components
 - **`src/index.ts`** - Main MCP server with tool handlers and stdio transport
-- **`src/services/key-detector.ts`** - AST-based i18n key detection across frameworks
+- **`src/services/key-detector.ts`** - AST-based i18n key detection and hardcoded string detection
 - **`src/services/poeditor-client.ts`** - POEditor API client with rate limiting
 - **`src/services/key-suggester.ts`** - Intelligent key naming and improvement suggestions  
 - **`src/services/sync-manager.ts`** - Sync plan creation and execution
 - **`src/services/local-sync.ts`** - Local file synchronization (pull/push)
-- **`src/services/codemod.ts`** - Safe key renaming across codebases
+- **`src/services/codemod.ts`** - Safe key renaming and hardcoded string replacement
+- **`src/services/translation-service.ts`** - LLM-powered translation service integration
 - **`src/utils/config.ts`** - Configuration and cache management
 
 ### Key Features
@@ -57,6 +58,14 @@ The **POEditor Integration Studio** is a comprehensive MCP (Model Context Protoc
 - **Consistency checking**: Detects mixed naming conventions
 - **Abbreviation expansion**: `btn` → `button`, `msg` → `message`
 - **Namespace suggestions**: Based on file structure and usage patterns
+
+#### Hardcoded String Automation
+- **Pattern-based detection**: Vue templates, JSX content, string literals, placeholders, titles
+- **Context awareness**: Different handling for alerts, form fields, UI elements
+- **Language detection**: English/Italian recognition using word frequency analysis
+- **Confidence scoring**: Filters out technical terms, URLs, non-translatable content
+- **LLM integration**: Requests translations with structured prompts and context
+- **Framework-specific replacement**: Generates appropriate i18n calls for each framework
 
 ## MCP Tools Reference
 
@@ -136,6 +145,22 @@ The **POEditor Integration Studio** is a comprehensive MCP (Model Context Protoc
 - `confirmLowConfidence`: Apply low-confidence renames (default: false)
 - `backup`: Create backup files (default: true)
 
+### `poeditor_process_hardcoded_strings`
+**Purpose**: Comprehensive hardcoded string detection, translation, and replacement workflow
+
+**Required Parameters**:
+- `globs`: Array of file patterns to scan for hardcoded strings
+- `frameworks`: Array of target frameworks
+- `projectId`: POEditor project ID or slug
+
+**Optional Parameters**:
+- `targetLanguages`: Languages for translation (default: `["en", "it", "de", "es", "fr"]`)
+- `ignore`: Patterns to exclude (default: `["node_modules/**", "dist/**"]`)
+- `dryRun`: Preview without executing (default: false)
+- `minConfidence`: Confidence threshold for processing (default: 0.7)
+- `batchSize`: Strings per batch for processing (default: 10)
+- `replaceInCode`: Replace strings with i18n calls (default: true)
+
 ## Configuration
 
 ### Environment Variables (.env)
@@ -201,6 +226,15 @@ claude "Use poeditor_sync with the plan from diff, enable dryRun to preview chan
 #### Test Local File Sync
 ```bash
 claude "Use poeditor_sync_local to pull translations in i18next format to src/locales"
+```
+
+#### Test Hardcoded String Processing
+```bash
+# Preview hardcoded strings (dry run)
+claude "Use poeditor_process_hardcoded_strings with globs ['src/**/*.vue'], frameworks ['vue3'], projectId 12345, and dryRun true"
+
+# Process with LLM translation request
+claude "Use poeditor_process_hardcoded_strings with the same parameters but dryRun false to request translations"
 ```
 
 ### Debugging and Troubleshooting

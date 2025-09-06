@@ -3,6 +3,8 @@ import * as path from 'path';
 import { glob } from 'fast-glob';
 import { DetectedKey, I18nFramework, ParseResult, ASTPattern, KeyUsage } from '@/types/index.js';
 
+export type ProgressCallback = (current: number, total: number, message?: string) => void;
+
 export interface HardcodedString {
   text: string;
   suggestedKey: string;
@@ -14,6 +16,8 @@ export interface HardcodedString {
 }
 
 export class POEditorDetector {
+  // Cache of parsed file results keyed by `${absPath}:${mtimeMs}`
+  private detectionCache = new Map<string, DetectedKey[]>();
   // Patterns for detecting hardcoded strings that should be translated
   private hardcodedStringPatterns = [
     // Vue template strings
@@ -177,8 +181,10 @@ export class POEditorDetector {
     sourceLang: string;
     resourceFormats: string[];
     ignore: string[];
+    progress?: ProgressCallback;
+    concurrency?: number;
   }): Promise<ParseResult> {
-    const { globs, frameworks, ignore } = options;
+    const { globs, frameworks, ignore, progress } = options;
     const allKeys: DetectedKey[] = [];
     const errors: Array<{ file: string; line: number; message: string }> = [];
     let filesProcessed = 0;
@@ -192,25 +198,43 @@ export class POEditorDetector {
 
       console.error(`Found ${files.length} files to process`);
 
-      // Process each file
-      for (const filePath of files) {
-        try {
-          const content = await fs.readFile(filePath, 'utf-8');
-          const fileKeys = await this.parseFile(filePath, content, frameworks);
-          allKeys.push(...fileKeys);
-          filesProcessed++;
-          
-          if (filesProcessed % 50 === 0) {
-            console.error(`Processed ${filesProcessed}/${files.length} files...`);
+      // Process files in parallel with a conservative concurrency limit
+      const concurrency = Math.max(1, Math.min(options.concurrency ?? 8, 32));
+      let index = 0;
+      const worker = async () => {
+        while (true) {
+          const i = index++;
+          if (i >= files.length) break;
+          const filePath = files[i];
+          try {
+            const stat = await fs.stat(filePath);
+            const cacheKey = `${filePath}:${stat.mtimeMs}`;
+            if (this.detectionCache.has(cacheKey)) {
+              allKeys.push(...(this.detectionCache.get(cacheKey) || []));
+            } else {
+              const content = await fs.readFile(filePath, 'utf-8');
+              const fileKeys = await this.parseFile(filePath, content, frameworks);
+              this.detectionCache.set(cacheKey, fileKeys);
+              allKeys.push(...fileKeys);
+            }
+          } catch (error) {
+            errors.push({
+              file: filePath,
+              line: 0,
+              message: error instanceof Error ? error.message : String(error),
+            });
+          } finally {
+            filesProcessed++;
+            if (filesProcessed % 50 === 0) {
+              console.error(`Processed ${filesProcessed}/${files.length} files...`);
+            }
+            if (progress) {
+              progress(filesProcessed, files.length, `Processed ${filesProcessed}/${files.length}`);
+            }
           }
-        } catch (error) {
-          errors.push({
-            file: filePath,
-            line: 0,
-            message: error instanceof Error ? error.message : String(error),
-          });
         }
-      }
+      };
+      await Promise.all(Array.from({ length: concurrency }, () => worker()));
 
       // Also scan for resource files
       const resourceKeys = await this.scanResourceFiles(options);

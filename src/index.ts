@@ -18,6 +18,7 @@ import { SyncManager } from '@/services/sync-manager.js';
 import { LocalSyncManager } from '@/services/local-sync.js';
 import { CodemodManager } from '@/services/codemod.js';
 import { TranslationService } from '@/services/translation-service.js';
+import { SetupWizard } from '@/utils/setup-wizard.js';
 import { DetectedKey, I18nFramework } from '@/types/index.js';
 
 interface DetectKeysArgs {
@@ -84,6 +85,21 @@ interface ProcessHardcodedStringsArgs {
   replaceInCode?: boolean;
 }
 
+interface SetupProjectArgs {
+  projectPath?: string;
+  apiToken?: string;
+  projectId?: string;
+  frameworks?: I18nFramework[];
+  globs?: string[];
+  sourceLang?: string;
+  targetLangs?: string[];
+  createSamples?: boolean;
+}
+
+interface ValidateConfigArgs {
+  configPath?: string;
+}
+
 class POEditorMCPServer {
   private server: Server;
   private detector: POEditorDetector;
@@ -94,6 +110,7 @@ class POEditorMCPServer {
   private localSync: LocalSyncManager;
   private codemod: CodemodManager;
   private translator: TranslationService;
+  private setupWizard: SetupWizard;
 
   constructor() {
     this.server = new Server(
@@ -116,6 +133,7 @@ class POEditorMCPServer {
     this.localSync = new LocalSyncManager(this.client);
     this.codemod = new CodemodManager();
     this.translator = new TranslationService();
+    this.setupWizard = new SetupWizard();
 
     this.setupHandlers();
   }
@@ -414,6 +432,67 @@ class POEditorMCPServer {
             required: ['globs', 'frameworks', 'projectId'],
           },
         },
+        {
+          name: 'poeditor_setup_project',
+          description: 'Interactive setup wizard to configure POEditor MCP for your project with automatic framework detection',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              projectPath: {
+                type: 'string',
+                description: 'Path to project directory (defaults to current directory)',
+              },
+              apiToken: {
+                type: 'string',
+                description: 'POEditor API token (will be saved to .env)',
+              },
+              projectId: {
+                type: 'string',
+                description: 'POEditor project ID',
+              },
+              frameworks: {
+                type: 'array',
+                items: { type: 'string', enum: ['vue3', 'nuxt3', 'react-native', 'i18next'] },
+                description: 'Target frameworks (auto-detected if not provided)',
+              },
+              globs: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'File patterns to scan (auto-generated if not provided)',
+              },
+              sourceLang: {
+                type: 'string',
+                description: 'Source language code',
+                default: 'en',
+              },
+              targetLangs: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'Target languages for translation',
+                default: ['de', 'es', 'fr', 'it'],
+              },
+              createSamples: {
+                type: 'boolean',
+                description: 'Create sample i18n files and configuration',
+                default: true,
+              },
+            },
+            required: ['apiToken', 'projectId'],
+          },
+        },
+        {
+          name: 'poeditor_validate_config',
+          description: 'Validate POEditor MCP configuration and provide improvement suggestions',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              configPath: {
+                type: 'string',
+                description: 'Path to configuration file (auto-detected if not provided)',
+              },
+            },
+          },
+        },
       ],
     }));
 
@@ -436,6 +515,10 @@ class POEditorMCPServer {
             return await this.handleApplyRenames((args as unknown) as ApplyRenamesArgs);
           case 'poeditor_process_hardcoded_strings':
             return await this.handleProcessHardcodedStrings((args as unknown) as ProcessHardcodedStringsArgs);
+          case 'poeditor_setup_project':
+            return await this.handleSetupProject((args as unknown) as SetupProjectArgs);
+          case 'poeditor_validate_config':
+            return await this.handleValidateConfig((args as unknown) as ValidateConfigArgs);
           default:
             throw new McpError(
               ErrorCode.MethodNotFound,
@@ -452,6 +535,19 @@ class POEditorMCPServer {
   }
 
   private async handleDetectKeys(args: DetectKeysArgs) {
+    if (!args.globs || args.globs.length === 0) {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        'globs must be a non-empty array, e.g., ["src/**/*.vue", "src/**/*.{ts,tsx}"]'
+      );
+    }
+    if (!args.frameworks || args.frameworks.length === 0) {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        'frameworks must be a non-empty array. Allowed: vue3, nuxt3, react-native, i18next'
+      );
+    }
+
     const result = await this.detector.detectKeys({
       globs: args.globs,
       frameworks: args.frameworks,
@@ -772,6 +868,156 @@ Please respond in JSON format:
     }
   ]
 }`;
+  }
+
+  private async handleSetupProject(args: SetupProjectArgs) {
+    const {
+      projectPath = process.cwd(),
+      apiToken,
+      projectId,
+      frameworks,
+      globs,
+      sourceLang = 'en',
+      targetLangs = ['de', 'es', 'fr', 'it'],
+      createSamples = false
+    } = args;
+
+    console.error('Starting interactive project setup...');
+
+    // Detect project structure
+    const detection = await this.setupWizard.detectProject(projectPath);
+    
+    // Use provided parameters or detected values
+    const finalFrameworks = frameworks || detection.detectedFrameworks as I18nFramework[];
+    const finalGlobs = globs || detection.suggestedGlobs;
+
+    // Validate API token if provided
+    let tokenValidation = null;
+    let finalApiToken = apiToken;
+    let finalProjectId = projectId;
+
+    if (apiToken) {
+      tokenValidation = await this.setupWizard.validateApiToken(apiToken);
+      if (!tokenValidation.valid) {
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          `Invalid API token: ${tokenValidation.error}`
+        );
+      }
+
+      // If no project ID provided, suggest available projects
+      if (!projectId && tokenValidation.projects && tokenValidation.projects.length > 0) {
+        const projectsList = tokenValidation.projects
+          .slice(0, 5)
+          .map(p => `• ${p.name} (ID: ${p.id})`)
+          .join('\n');
+        
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          `Project ID required. Available projects:\n${projectsList}`
+        );
+      }
+    }
+
+    // Generate configuration if we have all required parameters
+    let configPath = null;
+    if (finalApiToken && finalProjectId) {
+      configPath = await this.setupWizard.generateConfig({
+        apiToken: finalApiToken,
+        projectId: finalProjectId,
+        frameworks: finalFrameworks,
+        globs: finalGlobs,
+        sourceLang,
+        targetLangs,
+        projectPath
+      });
+
+      // Create sample files if requested
+      if (createSamples && finalFrameworks.length > 0) {
+        await this.setupWizard.createSampleFiles(projectPath, finalFrameworks);
+      }
+    }
+
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: `Project Setup Results:
+
+📁 Project Path: ${projectPath}
+📦 Package Manager: ${detection.packageManager}
+🚀 Detected Frameworks: ${detection.detectedFrameworks.join(', ') || 'None'}
+📄 Suggested Globs: ${detection.suggestedGlobs.join(', ')}
+🌐 Existing i18n: ${detection.hasExistingI18n ? 'Yes' : 'No'}
+📋 Existing Configs: ${detection.existingConfigFiles.join(', ') || 'None'}
+
+${tokenValidation ? `
+🔑 API Token: ${tokenValidation.valid ? '✅ Valid' : `❌ Invalid (${tokenValidation.error})`}
+${tokenValidation.projects ? `📊 Available Projects: ${tokenValidation.projects.length}` : ''}
+` : ''}
+
+${configPath ? `
+✅ Configuration generated: ${configPath}
+${createSamples ? '📝 Sample files created' : ''}
+
+Next steps:
+1. Review the generated .smartness-i18n.json configuration
+2. Add your POEditor API token to .env if not already done
+3. Test the setup with: poeditor_detect_keys
+4. Start detecting and managing your i18n keys!
+` : `
+⚠️  Configuration not generated. To complete setup, provide:
+${!finalApiToken ? '• API token (POEDITOR_API_TOKEN)' : ''}
+${!finalProjectId ? '• Project ID (POEDITOR_PROJECT_ID)' : ''}
+
+Use this tool again with apiToken and projectId parameters to generate configuration.
+`}`,
+        },
+      ],
+    };
+  }
+
+  private async handleValidateConfig(args: ValidateConfigArgs) {
+    const { configPath } = args;
+
+    console.error('Validating POEditor MCP configuration...');
+
+    const validation = await this.setupWizard.validateConfiguration(configPath);
+
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: `Configuration Validation Results:
+
+${validation.valid ? '✅ Configuration is valid!' : '❌ Configuration has issues'}
+
+${validation.errors.length > 0 ? `
+🚨 Errors (${validation.errors.length}):
+${validation.errors.map(error => `• ${error}`).join('\n')}
+` : ''}
+
+${validation.warnings.length > 0 ? `
+⚠️  Warnings (${validation.warnings.length}):
+${validation.warnings.map(warning => `• ${warning}`).join('\n')}
+` : ''}
+
+${validation.suggestions.length > 0 ? `
+💡 Suggestions (${validation.suggestions.length}):
+${validation.suggestions.map(suggestion => `• ${suggestion}`).join('\n')}
+` : ''}
+
+${validation.valid ? `
+🎉 Your configuration is ready to use! Try these commands:
+• poeditor_detect_keys - Scan your project for i18n keys
+• poeditor_diff - Compare local keys with POEditor
+• poeditor_process_hardcoded_strings - Find and process hardcoded strings
+` : `
+🔧 Fix the errors above and run validation again to ensure your setup is working correctly.
+`}`,
+        },
+      ],
+    };
   }
 
   async run() {

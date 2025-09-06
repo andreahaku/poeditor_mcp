@@ -28,6 +28,12 @@ A comprehensive MCP (Model Context Protocol) server that eliminates the pain of 
 - **Resource file updates**: JSON and TypeScript translation files
 - **Backup creation**: Automatic backup before changes
 
+### 🚀 Hardcoded String Automation
+- **Intelligent string detection**: Finds translatable hardcoded strings in templates, JSX, and literals
+- **LLM-powered translation**: Requests language detection and translations from AI models
+- **Context-aware replacement**: Generates framework-specific i18n calls
+- **End-to-end workflow**: Detects → Translates → Creates POEditor keys → Replaces code
+
 ## Quick Start
 
 ### 1. Installation
@@ -108,6 +114,12 @@ claude "Use poeditor_sync_local to pull translations in i18next format to src/lo
 claude "Use poeditor_apply_renames to apply the suggested key renames across src/**/*.vue files with backup enabled"
 ```
 
+### Process Hardcoded Strings (New!)
+
+```bash
+claude "Use poeditor_process_hardcoded_strings to find hardcoded strings in src/**/*.vue files, get translations, and replace with i18n calls"
+```
+
 ## MCP Tools
 
 ### `poeditor_detect_keys`
@@ -173,6 +185,20 @@ Apply key rename map safely across code and resources.
 - `resourceDirs`: Resource directories to update
 - `confirmLowConfidence`: Apply low-confidence renames
 - `backup`: Create backup files (default: true)
+
+### `poeditor_process_hardcoded_strings`
+Find hardcoded strings, detect language, translate to target languages, create POEditor keys, and replace with i18n calls.
+
+**Parameters:**
+- `globs`: File patterns to scan for hardcoded strings
+- `frameworks`: Target frameworks (`["vue3", "nuxt3", "react-native", "i18next"]`)
+- `projectId`: POEditor project ID or slug
+- `targetLanguages`: Languages for translation (default: `["en", "it", "de", "es", "fr"]`)
+- `ignore`: Patterns to ignore (default: `["node_modules/**", "dist/**"]`)
+- `dryRun`: Preview changes without executing (default: false)
+- `minConfidence`: Minimum confidence threshold (default: 0.7)
+- `batchSize`: Strings to process per batch (default: 10)
+- `replaceInCode`: Replace hardcoded strings with i18n calls (default: true)
 
 ## Framework Support
 
@@ -320,6 +346,18 @@ claude "Use poeditor_apply_renames with confirmLowConfidence=true"
 
 # Clean up POEditor
 claude "Use poeditor_diff with deleteExtraneous=true to remove unused keys"
+```
+
+### 4. Hardcoded String Migration
+```bash
+# Find hardcoded strings (dry run first)
+claude "Use poeditor_process_hardcoded_strings with dryRun=true to preview hardcoded strings"
+
+# Request LLM translation and create POEditor keys
+claude "Use poeditor_process_hardcoded_strings to automate the full workflow"
+
+# Pull updated translations to local files
+claude "Use poeditor_sync_local to pull all translations with new keys"
 ```
 
 ## Rate Limiting

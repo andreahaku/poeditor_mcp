@@ -46,6 +46,18 @@ export class POEditorClient {
   private apiToken: string | null = null;
   private baseURL = 'https://api.poeditor.com/v2';
 
+  // Custom API error with status + retry info
+  private static ApiError = class extends Error {
+    status?: number;
+    retryAfterMs?: number;
+    constructor(message: string, status?: number, retryAfterMs?: number) {
+      super(message);
+      this.name = 'POEditorApiError';
+      this.status = status;
+      this.retryAfterMs = retryAfterMs;
+    }
+  };
+
   constructor(apiToken?: string) {
     this.apiToken = apiToken || process.env.POEDITOR_API_TOKEN || null;
     
@@ -61,12 +73,21 @@ export class POEditorClient {
     this.client.interceptors.response.use(
       (response) => response,
       (error) => {
-        if (error.response?.status === 429) {
-          throw new Error('Rate limit exceeded. Please wait before making another request.');
+        const status = error.response?.status as number | undefined;
+        const retryAfterHeader = error.response?.headers?.['retry-after'] as string | undefined;
+        const retryAfterMs = retryAfterHeader ? parseInt(retryAfterHeader, 10) * 1000 : undefined;
+
+        if (status === 429) {
+          throw new POEditorClient.ApiError(
+            'Rate limit exceeded. Retrying with backoff.',
+            429,
+            retryAfterMs
+          );
         }
-        if (error.response?.status === 401) {
-          throw new Error('Invalid API token. Please check your POEditor API token.');
+        if (status === 401) {
+          throw new POEditorClient.ApiError('Invalid API token. Check POEditor API token.', 401);
         }
+        // Forward as-is for other cases; makeRequest will wrap
         throw error;
       }
     );
@@ -100,15 +121,23 @@ export class POEditorClient {
 
     try {
       const response: AxiosResponse = await this.client.post(endpoint, formData);
-      
+
       if (response.data.response?.status !== 'success') {
-        throw new Error(`POEditor API error: ${response.data.response?.message || 'Unknown error'}`);
+        throw new POEditorClient.ApiError(
+          `POEditor API error: ${response.data.response?.message || 'Unknown error'}`
+        );
       }
 
       return response.data.result;
-    } catch (error) {
+    } catch (error: any) {
+      if (error?.name === 'POEditorApiError') {
+        throw error;
+      }
       if (axios.isAxiosError(error)) {
-        throw new Error(`POEditor API request failed: ${error.message}`);
+        throw new POEditorClient.ApiError(
+          `POEditor API request failed: ${error.message}`,
+          error.response?.status
+        );
       }
       throw error;
     }
@@ -299,12 +328,39 @@ export class POEditorClient {
 
   // Rate limiting helper
   async withRateLimit<T>(operation: () => Promise<T>, minDelay = 20000): Promise<T> {
-    const result = await operation();
-    
-    // Wait for minimum delay to respect rate limits
-    await new Promise(resolve => setTimeout(resolve, minDelay));
-    
-    return result;
+    const maxRetries = 5;
+    let attempt = 0;
+    let delay = minDelay;
+
+    while (true) {
+      try {
+        const result = await operation();
+        // Respect minimum inter-request delay
+        await new Promise((r) => setTimeout(r, minDelay));
+        return result;
+      } catch (err: any) {
+        const isApiErr = err?.name === 'POEditorApiError';
+        const status = isApiErr ? (err.status as number | undefined) : undefined;
+        const retryAfterMs = isApiErr ? (err.retryAfterMs as number | undefined) : undefined;
+
+        // Retry for rate limit or intermittent server issues
+        if ((status === 429 || status === 503) && attempt < maxRetries) {
+          const jitter = Math.floor(Math.random() * 5000);
+          const waitMs = Math.max(minDelay, retryAfterMs ?? Math.min(60000, delay * Math.pow(2, attempt))) + jitter;
+          console.error(`Rate limited (attempt ${attempt + 1}/${maxRetries}). Waiting ${waitMs}ms before retry...`);
+          await new Promise((r) => setTimeout(r, waitMs));
+          attempt++;
+          continue;
+        }
+
+        // Surface better error message
+        throw new Error(
+          isApiErr
+            ? `POEditor API error${status ? ` (status ${status})` : ''}: ${err.message}`
+            : (err instanceof Error ? err.message : String(err))
+        );
+      }
+    }
   }
 
   // Batch operations helper
