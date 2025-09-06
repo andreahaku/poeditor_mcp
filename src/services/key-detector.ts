@@ -3,7 +3,103 @@ import * as path from 'path';
 import { glob } from 'fast-glob';
 import { DetectedKey, I18nFramework, ParseResult, ASTPattern, KeyUsage } from '@/types/index.js';
 
+export interface HardcodedString {
+  text: string;
+  suggestedKey: string;
+  confidence: number;
+  isTranslatable: boolean;
+  language: 'en' | 'it';
+  files: KeyUsage[];
+  context: string;
+}
+
 export class POEditorDetector {
+  // Patterns for detecting hardcoded strings that should be translated
+  private hardcodedStringPatterns = [
+    // Vue template strings
+    {
+      pattern: />([^<>{}\n]{3,}[a-zA-Z][^<>{}]*)</g,
+      context: 'vue-template',
+      exclude: /^[\s\d\-_.,;:!@#$%^&*()+=\[\]{}|\\\/"`~<>?]*$/,
+    },
+    // HTML content
+    {
+      pattern: />([\w\s.,!?:;'"()-]+)</g,
+      context: 'html-content',
+      exclude: /^[\s\d\-_.,;:!@#$%^&*()+=\[\]{}|\\\/"`~<>?]*$/,
+    },
+    // Button/link text in JSX/TSX
+    {
+      pattern: />([A-Z][a-zA-Z\s.,!?:;'"()-]{2,})</g,
+      context: 'jsx-content',
+      exclude: /^[\s\d\-_.,;:!@#$%^&*()+=\[\]{}|\\\/"`~<>?]*$/,
+    },
+    // String literals that look like user-facing text
+    {
+      pattern: /['"`]([A-Z][a-zA-Z\s.,!?:;'"()-]{4,})['"`]/g,
+      context: 'string-literal',
+      exclude: /^(console|log|error|warn|info|debug|className|class|id|type|name|key|value|href|src|alt|title|data-|aria-|test|spec)$/i,
+    },
+    // Alert, confirm, prompt messages
+    {
+      pattern: /(?:alert|confirm|prompt)\s*\(\s*['"`]([^'"`]{5,})['"`]/g,
+      context: 'alert-message',
+      exclude: /^[\s\d\-_.,;:!@#$%^&*()+=\[\]{}|\\\/"`~<>?]*$/,
+    },
+    // Placeholder attributes
+    {
+      pattern: /placeholder\s*=\s*['"`]([^'"`]{3,})['"`]/g,
+      context: 'placeholder',
+      exclude: /^[\s\d\-_.,;:!@#$%^&*()+=\[\]{}|\\\/"`~<>?]*$/,
+    },
+    // Title attributes
+    {
+      pattern: /title\s*=\s*['"`]([^'"`]{3,})['"`]/g,
+      context: 'title-attribute',
+      exclude: /^[\s\d\-_.,;:!@#$%^&*()+=\[\]{}|\\\/"`~<>?]*$/,
+    },
+  ];
+
+  // Common English and Italian words to help identify language
+  private englishWords = new Set([
+    'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by',
+    'from', 'about', 'into', 'through', 'during', 'before', 'after', 'above',
+    'below', 'up', 'down', 'out', 'off', 'over', 'under', 'again', 'further',
+    'then', 'once', 'here', 'there', 'when', 'where', 'why', 'how', 'all',
+    'any', 'both', 'each', 'few', 'more', 'most', 'other', 'some', 'such',
+    'no', 'nor', 'not', 'only', 'own', 'same', 'so', 'than', 'too', 'very',
+    'can', 'will', 'just', 'should', 'now', 'click', 'save', 'delete', 'edit',
+    'cancel', 'confirm', 'submit', 'send', 'create', 'update', 'remove', 'add'
+  ]);
+
+  private italianWords = new Set([
+    'il', 'la', 'lo', 'le', 'gli', 'un', 'una', 'uno', 'di', 'a', 'da', 'in',
+    'con', 'su', 'per', 'tra', 'fra', 'come', 'quando', 'dove', 'perché',
+    'che', 'chi', 'cui', 'quale', 'quanto', 'ogni', 'tutto', 'alcuni', 'molti',
+    'più', 'meno', 'molto', 'poco', 'tanto', 'troppo', 'abbastanza', 'ancora',
+    'già', 'mai', 'sempre', 'spesso', 'presto', 'tardi', 'qui', 'qua', 'là',
+    'lì', 'sopra', 'sotto', 'dentro', 'fuori', 'prima', 'dopo', 'durante',
+    'contro', 'verso', 'senza', 'salva', 'elimina', 'modifica', 'annulla',
+    'conferma', 'invia', 'crea', 'aggiorna', 'rimuovi', 'aggiungi', 'clicca'
+  ]);
+
+  // Non-translatable patterns (technical terms, code, etc.)
+  private nonTranslatablePatterns = [
+    /^[A-Z_]+$/, // ALL_CAPS constants
+    /^[a-z-]+$/, // kebab-case
+    /^[a-zA-Z]+\d+$/, // alphanumeric identifiers
+    /^\d+(\.\d+)*$/, // version numbers
+    /^https?:\/\//, // URLs
+    /^\/[\/\w-]*$/, // paths
+    /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/, // emails
+    /^#[a-fA-F0-9]{3,8}$/, // hex colors
+    /^rgb\(/, // RGB colors
+    /console|log|error|warn|info|debug/i, // console methods
+    /^(true|false|null|undefined)$/i, // literals
+    /^[{}\[\]()]+$/, // brackets only
+    /^\s*$/, // whitespace only
+  ];
+
   private astPatterns: { [framework: string]: ASTPattern[] } = {
     vue3: [
       {
@@ -152,7 +248,8 @@ export class POEditorDetector {
       const patterns = this.astPatterns[framework] || [];
       
       for (const pattern of patterns) {
-        const matches = content.matchAll(pattern.pattern);
+        const regex = typeof pattern.pattern === 'string' ? new RegExp(pattern.pattern, 'g') : pattern.pattern;
+        const matches = content.matchAll(regex);
         
         for (const match of matches) {
           const key = pattern.keyExtractor(match);
@@ -394,5 +491,217 @@ export class POEditorDetector {
     }
     
     return Array.from(keyMap.values());
+  }
+
+  async detectHardcodedStrings(options: {
+    globs: string[];
+    frameworks: I18nFramework[];
+    ignore: string[];
+  }): Promise<{ hardcodedStrings: HardcodedString[]; errors: Array<{ file: string; line: number; message: string }> }> {
+    const { globs, ignore } = options;
+    const hardcodedStrings: HardcodedString[] = [];
+    const errors: Array<{ file: string; line: number; message: string }> = [];
+    let filesProcessed = 0;
+
+    try {
+      const files = await glob(globs, {
+        ignore,
+        absolute: true,
+      });
+
+      console.error(`Scanning ${files.length} files for hardcoded strings...`);
+
+      for (const filePath of files) {
+        try {
+          const content = await fs.readFile(filePath, 'utf-8');
+          const fileStrings = await this.parseFileForHardcodedStrings(filePath, content);
+          hardcodedStrings.push(...fileStrings);
+          filesProcessed++;
+          
+          if (filesProcessed % 50 === 0) {
+            console.error(`Processed ${filesProcessed}/${files.length} files...`);
+          }
+        } catch (error) {
+          errors.push({
+            file: filePath,
+            line: 0,
+            message: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+
+      console.error(`Hardcoded string detection complete: ${hardcodedStrings.length} strings found`);
+
+      return {
+        hardcodedStrings: this.deduplicateHardcodedStrings(hardcodedStrings),
+        errors,
+      };
+    } catch (error) {
+      throw new Error(`Hardcoded string detection failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  private async parseFileForHardcodedStrings(filePath: string, content: string): Promise<HardcodedString[]> {
+    const strings: HardcodedString[] = [];
+    const lines = content.split('\n');
+
+    for (const patternConfig of this.hardcodedStringPatterns) {
+      const matches = content.matchAll(patternConfig.pattern);
+      
+      for (const match of matches) {
+        const text = match[1]?.trim();
+        if (!text || text.length < 3) continue;
+
+        // Skip if matches exclude pattern
+        if (patternConfig.exclude && patternConfig.exclude.test(text)) continue;
+
+        // Skip if matches non-translatable patterns
+        if (this.nonTranslatablePatterns.some(pattern => pattern.test(text))) continue;
+
+        // Determine if this looks translatable
+        const isTranslatable = this.isTranslatable(text);
+        if (!isTranslatable) continue;
+
+        // Detect language
+        const language = this.detectLanguage(text);
+
+        // Calculate confidence based on various factors
+        const confidence = this.calculateConfidence(text, patternConfig.context);
+
+        // Find line and column
+        const matchIndex = match.index || 0;
+        const beforeMatch = content.slice(0, matchIndex);
+        const lineNumber = beforeMatch.split('\n').length;
+        const columnNumber = beforeMatch.split('\n').pop()?.length || 0;
+
+        // Extract context
+        const contextStart = Math.max(0, lineNumber - 2);
+        const contextEnd = Math.min(lines.length, lineNumber + 1);
+        const context = lines.slice(contextStart, contextEnd).join('\n');
+
+        // Generate suggested key
+        const suggestedKey = this.generateKeyFromText(text, filePath, patternConfig.context);
+
+        const usage: KeyUsage = {
+          path: filePath,
+          line: lineNumber,
+          column: columnNumber,
+          context,
+        };
+
+        strings.push({
+          text,
+          suggestedKey,
+          confidence,
+          isTranslatable,
+          language,
+          files: [usage],
+          context: patternConfig.context,
+        });
+      }
+    }
+
+    return strings;
+  }
+
+  private isTranslatable(text: string): boolean {
+    // Must contain at least one letter
+    if (!/[a-zA-Z]/.test(text)) return false;
+
+    // Must be longer than 2 characters
+    if (text.length < 3) return false;
+
+    // Should contain common sentence patterns
+    const hasWords = /\b\w{2,}\b/.test(text);
+    const hasSpaces = /\s/.test(text);
+    const startsWithCapital = /^[A-Z]/.test(text);
+    
+    // Likely user-facing text if it has words and either spaces or starts with capital
+    return hasWords && (hasSpaces || startsWithCapital);
+  }
+
+  private detectLanguage(text: string): 'en' | 'it' {
+    const words = text.toLowerCase().split(/\s+/).filter(w => w.length > 1);
+    let englishScore = 0;
+    let italianScore = 0;
+
+    for (const word of words) {
+      if (this.englishWords.has(word)) englishScore++;
+      if (this.italianWords.has(word)) italianScore++;
+    }
+
+    // Default to English if no clear indication
+    return italianScore > englishScore ? 'it' : 'en';
+  }
+
+  private calculateConfidence(text: string, context: string): number {
+    let confidence = 0.5; // Base confidence
+
+    // Higher confidence for certain contexts
+    if (['alert-message', 'placeholder', 'title-attribute'].includes(context)) {
+      confidence += 0.3;
+    }
+
+    // Higher confidence for longer text
+    if (text.length > 10) confidence += 0.1;
+    if (text.length > 20) confidence += 0.1;
+
+    // Higher confidence for sentence-like text
+    if (/[.!?]$/.test(text)) confidence += 0.2;
+    if (/^[A-Z]/.test(text)) confidence += 0.1;
+    
+    // Higher confidence if contains common UI words
+    const uiWords = ['click', 'save', 'delete', 'edit', 'cancel', 'confirm', 'submit', 'create', 'update'];
+    if (uiWords.some(word => text.toLowerCase().includes(word))) {
+      confidence += 0.2;
+    }
+
+    return Math.min(1, confidence);
+  }
+
+  private generateKeyFromText(text: string, filePath: string, context: string): string {
+    // Get base filename without extension
+    const filename = path.basename(filePath, path.extname(filePath));
+    
+    // Clean and normalize text for key generation
+    let keyPart = text
+      .toLowerCase()
+      .replace(/[^a-zA-Z0-9\s]/g, '') // Remove special chars
+      .replace(/\s+/g, '_') // Replace spaces with underscores
+      .substring(0, 30); // Limit length
+
+    // Remove common words that don't add meaning
+    const stopWords = ['the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by'];
+    keyPart = keyPart
+      .split('_')
+      .filter(word => !stopWords.includes(word) && word.length > 1)
+      .join('_');
+
+    // Generate hierarchical key
+    const contextPrefix = context === 'placeholder' ? 'placeholder' :
+                         context === 'title-attribute' ? 'title' :
+                         context === 'alert-message' ? 'alert' : 'text';
+
+    return `${filename}.${contextPrefix}.${keyPart}`;
+  }
+
+  private deduplicateHardcodedStrings(strings: HardcodedString[]): HardcodedString[] {
+    const stringMap = new Map<string, HardcodedString>();
+    
+    for (const str of strings) {
+      const key = `${str.text}:${str.context}`;
+      const existing = stringMap.get(key);
+      
+      if (existing) {
+        existing.files.push(...str.files);
+        existing.confidence = Math.max(existing.confidence, str.confidence);
+      } else {
+        stringMap.set(key, { ...str });
+      }
+    }
+    
+    return Array.from(stringMap.values())
+      .filter(str => str.confidence > 0.5) // Only include high-confidence strings
+      .sort((a, b) => b.confidence - a.confidence);
   }
 }

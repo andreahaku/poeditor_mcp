@@ -7,15 +7,82 @@ import {
   ErrorCode,
   ListToolsRequestSchema,
   McpError,
+  CallToolRequest,
 } from '@modelcontextprotocol/sdk/types.js';
 
-import { POEditorDetector } from '@/services/key-detector.js';
+import { POEditorDetector, HardcodedString } from '@/services/key-detector.js';
 import { POEditorClient } from '@/services/poeditor-client.js';
 import { ConfigManager } from '@/utils/config.js';
 import { KeyNameSuggester } from '@/services/key-suggester.js';
 import { SyncManager } from '@/services/sync-manager.js';
 import { LocalSyncManager } from '@/services/local-sync.js';
 import { CodemodManager } from '@/services/codemod.js';
+import { TranslationService } from '@/services/translation-service.js';
+import { DetectedKey, I18nFramework } from '@/types/index.js';
+
+interface DetectKeysArgs {
+  globs: string[];
+  frameworks: I18nFramework[];
+  sourceLang?: string;
+  resourceFormats?: string[];
+  ignore?: string[];
+}
+
+interface NameSuggestArgs {
+  keys: DetectedKey[];
+  style?: 'dot' | 'kebab';
+  rules?: any;
+  allowlist?: string[];
+  denylist?: string[];
+}
+
+interface DiffArgs {
+  projectId: string;
+  sourceLang?: string;
+  includeLangs?: string[];
+  keys?: any[];
+  deleteExtraneous?: boolean;
+}
+
+interface SyncArgs {
+  plan: any;
+  batchSize?: number;
+  direction?: 'up';
+  machineTranslate?: boolean;
+  dryRun?: boolean;
+  rateLimit?: number;
+}
+
+interface SyncLocalArgs {
+  projectId: string;
+  direction: 'push' | 'pull';
+  langs: string[];
+  format?: 'i18next' | 'vue-i18n-json' | 'vue-i18n-ts';
+  outDir?: string;
+  inDir?: string;
+  bundleSplit?: 'per-lang' | 'per-namespace';
+  dryRun?: boolean;
+}
+
+interface ApplyRenamesArgs {
+  renames: any[];
+  globs: string[];
+  resourceDirs?: string[];
+  confirmLowConfidence?: boolean;
+  backup?: boolean;
+}
+
+interface ProcessHardcodedStringsArgs {
+  globs: string[];
+  frameworks: I18nFramework[];
+  projectId: string;
+  targetLanguages?: string[];
+  ignore?: string[];
+  dryRun?: boolean;
+  minConfidence?: number;
+  batchSize?: number;
+  replaceInCode?: boolean;
+}
 
 class POEditorMCPServer {
   private server: Server;
@@ -26,6 +93,7 @@ class POEditorMCPServer {
   private syncManager: SyncManager;
   private localSync: LocalSyncManager;
   private codemod: CodemodManager;
+  private translator: TranslationService;
 
   constructor() {
     this.server = new Server(
@@ -47,6 +115,7 @@ class POEditorMCPServer {
     this.syncManager = new SyncManager(this.client);
     this.localSync = new LocalSyncManager(this.client);
     this.codemod = new CodemodManager();
+    this.translator = new TranslationService();
 
     this.setupHandlers();
   }
@@ -289,26 +358,84 @@ class POEditorMCPServer {
             required: ['renames', 'globs'],
           },
         },
+        {
+          name: 'poeditor_process_hardcoded_strings',
+          description: 'Find hardcoded strings, detect language, translate to target languages, create POEditor keys, and replace with i18n calls',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              globs: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'File glob patterns to scan for hardcoded strings',
+              },
+              frameworks: {
+                type: 'array',
+                items: { type: 'string', enum: ['vue3', 'nuxt3', 'react-native', 'i18next'] },
+                description: 'Target i18n frameworks',
+              },
+              projectId: {
+                type: 'string',
+                description: 'POEditor project ID or slug',
+              },
+              targetLanguages: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'Target languages for translation (e.g., ["en", "it", "de", "es", "fr"])',
+                default: ['en', 'it', 'de', 'es', 'fr'],
+              },
+              ignore: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'Patterns to ignore',
+                default: ['node_modules/**', 'dist/**'],
+              },
+              dryRun: {
+                type: 'boolean',
+                description: 'Preview changes without executing',
+                default: false,
+              },
+              minConfidence: {
+                type: 'number',
+                description: 'Minimum confidence threshold for processing strings',
+                default: 0.7,
+              },
+              batchSize: {
+                type: 'number',
+                description: 'Number of strings to process in each batch',
+                default: 10,
+              },
+              replaceInCode: {
+                type: 'boolean',
+                description: 'Replace hardcoded strings with i18n calls in code',
+                default: true,
+              },
+            },
+            required: ['globs', 'frameworks', 'projectId'],
+          },
+        },
       ],
     }));
 
-    this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    this.server.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest) => {
       const { name, arguments: args } = request.params;
 
       try {
         switch (name) {
           case 'poeditor_detect_keys':
-            return await this.handleDetectKeys(args);
+            return await this.handleDetectKeys((args as unknown) as DetectKeysArgs);
           case 'poeditor_name_suggest':
-            return await this.handleNameSuggest(args);
+            return await this.handleNameSuggest((args as unknown) as NameSuggestArgs);
           case 'poeditor_diff':
-            return await this.handleDiff(args);
+            return await this.handleDiff((args as unknown) as DiffArgs);
           case 'poeditor_sync':
-            return await this.handleSync(args);
+            return await this.handleSync((args as unknown) as SyncArgs);
           case 'poeditor_sync_local':
-            return await this.handleSyncLocal(args);
+            return await this.handleSyncLocal((args as unknown) as SyncLocalArgs);
           case 'poeditor_apply_renames':
-            return await this.handleApplyRenames(args);
+            return await this.handleApplyRenames((args as unknown) as ApplyRenamesArgs);
+          case 'poeditor_process_hardcoded_strings':
+            return await this.handleProcessHardcodedStrings((args as unknown) as ProcessHardcodedStringsArgs);
           default:
             throw new McpError(
               ErrorCode.MethodNotFound,
@@ -324,7 +451,7 @@ class POEditorMCPServer {
     });
   }
 
-  private async handleDetectKeys(args: any) {
+  private async handleDetectKeys(args: DetectKeysArgs) {
     const result = await this.detector.detectKeys({
       globs: args.globs,
       frameworks: args.frameworks,
@@ -348,7 +475,7 @@ class POEditorMCPServer {
     };
   }
 
-  private async handleNameSuggest(args: any) {
+  private async handleNameSuggest(args: NameSuggestArgs) {
     const suggestions = await this.suggester.suggestNames({
       keys: args.keys,
       style: args.style || 'dot',
@@ -372,7 +499,7 @@ class POEditorMCPServer {
     };
   }
 
-  private async handleDiff(args: any) {
+  private async handleDiff(args: DiffArgs) {
     const plan = await this.syncManager.createSyncPlan({
       projectId: args.projectId,
       sourceLang: args.sourceLang || 'en',
@@ -396,7 +523,7 @@ class POEditorMCPServer {
     };
   }
 
-  private async handleSync(args: any) {
+  private async handleSync(args: SyncArgs) {
     const result = await this.syncManager.executeSync({
       plan: args.plan,
       batchSize: args.batchSize || 100,
@@ -425,7 +552,7 @@ class POEditorMCPServer {
     };
   }
 
-  private async handleSyncLocal(args: any) {
+  private async handleSyncLocal(args: SyncLocalArgs) {
     const result = await this.localSync.syncFiles({
       projectId: args.projectId,
       direction: args.direction,
@@ -451,7 +578,7 @@ class POEditorMCPServer {
     };
   }
 
-  private async handleApplyRenames(args: any) {
+  private async handleApplyRenames(args: ApplyRenamesArgs) {
     const result = await this.codemod.applyRenames({
       renames: args.renames,
       globs: args.globs,
@@ -466,13 +593,185 @@ class POEditorMCPServer {
           type: 'text',
           text: `Codemod Results:\n\n` +
                 `• Files changed: ${result.changes.length}\n` +
-                `• Keys renamed: ${result.changes.reduce((sum, c) => sum + c.changes?.length || 0, 0)}\n` +
+                `• Keys renamed: ${result.changes.reduce((sum, c) => sum + (c.changes?.length || 0), 0)}\n` +
                 `• Conflicts: ${result.conflicts.length}\n` +
                 `• Skipped: ${result.skipped.length}\n\n` +
                 JSON.stringify(result, null, 2),
         },
       ],
     };
+  }
+
+  private async handleProcessHardcodedStrings(args: ProcessHardcodedStringsArgs) {
+    const {
+      globs,
+      frameworks,
+      projectId,
+      targetLanguages = ['en', 'it', 'de', 'es', 'fr'],
+      ignore = ['node_modules/**', 'dist/**'],
+      dryRun = false,
+      minConfidence = 0.7,
+      batchSize = 10,
+      replaceInCode = true,
+    } = args;
+
+    // Step 1: Detect hardcoded strings
+    console.error('Step 1: Detecting hardcoded strings...');
+    const { hardcodedStrings, errors } = await this.detector.detectHardcodedStrings({
+      globs,
+      frameworks,
+      ignore,
+    });
+
+    if (hardcodedStrings.length === 0) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: 'No hardcoded strings found that meet the confidence threshold.',
+          },
+        ],
+      };
+    }
+
+    // Filter by confidence threshold
+    const highConfidenceStrings = hardcodedStrings.filter(s => s.confidence >= minConfidence);
+    
+    if (highConfidenceStrings.length === 0) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Found ${hardcodedStrings.length} hardcoded strings, but none meet the minimum confidence threshold of ${minConfidence}. Consider lowering the threshold.`,
+          },
+        ],
+      };
+    }
+
+    // Step 2: Request translations from LLM (this is where the MCP server asks the LLM)
+    const translationResults: Array<{
+      originalString: HardcodedString;
+      detectedLanguage: string;
+      translations: Record<string, string>;
+    }> = [];
+
+    console.error(`Step 2: Requesting translations for ${highConfidenceStrings.length} strings...`);
+
+    // Process in batches to avoid overwhelming the system
+    for (let i = 0; i < highConfidenceStrings.length; i += batchSize) {
+      const batch = highConfidenceStrings.slice(i, i + batchSize);
+      
+      const batchRequest = batch.map(str => ({
+        text: str.text,
+        suggestedKey: str.suggestedKey,
+        context: str.context,
+        files: str.files.map(f => `${f.path}:${f.line}`).join(', '),
+      }));
+
+      // This is the key part: the MCP server requests translation from the LLM
+      const llmPrompt = this.buildBatchTranslationRequest(batchRequest, targetLanguages);
+      
+      // Return a request to the LLM for translation - this is where the user/LLM should respond
+      if (!dryRun && i === 0) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Found ${highConfidenceStrings.length} hardcoded strings ready for translation.\n\n` +
+                    `TRANSLATION REQUEST:\n` +
+                    `Please process the following hardcoded strings and provide translations:\n\n` +
+                    llmPrompt +
+                    `\n\nOnce you provide the translations, I will:\n` +
+                    `1. Create POEditor keys with the translations\n` +
+                    `2. Replace hardcoded strings with i18n calls in the code\n` +
+                    `3. Update local translation files\n\n` +
+                    `Raw data for processing:\n` +
+                    JSON.stringify({
+                      strings: batchRequest,
+                      targetLanguages,
+                      projectId,
+                      replaceInCode,
+                    }, null, 2),
+            },
+          ],
+        };
+      }
+    }
+
+    // If we get here, it's either a dry run or we're processing provided translations
+    return {
+      content: [
+        {
+          type: 'text',
+          text: `Hardcoded String Processing Summary:\n\n` +
+                `• Total strings found: ${hardcodedStrings.length}\n` +
+                `• High confidence strings: ${highConfidenceStrings.length}\n` +
+                `• Target languages: ${targetLanguages.join(', ')}\n` +
+                `• Files processed: ${new Set(hardcodedStrings.flatMap(s => s.files.map(f => f.path))).size}\n` +
+                `• Errors: ${errors.length}\n\n` +
+                `${dryRun ? 'DRY RUN - No changes made\n\n' : ''}` +
+                `Top hardcoded strings by confidence:\n` +
+                highConfidenceStrings.slice(0, 10).map(s => 
+                  `• "${s.text}" (${(s.confidence * 100).toFixed(0)}% confidence) → ${s.suggestedKey}`
+                ).join('\n') +
+                (highConfidenceStrings.length > 10 ? `\n... and ${highConfidenceStrings.length - 10} more` : ''),
+        },
+      ],
+    };
+  }
+
+  private buildBatchTranslationRequest(strings: Array<{
+    text: string;
+    suggestedKey: string;
+    context: string;
+    files: string;
+  }>, targetLanguages: string[]): string {
+    const languageNames = targetLanguages.map(lang => {
+      switch (lang) {
+        case 'en': return 'English';
+        case 'it': return 'Italian';
+        case 'de': return 'German';
+        case 'es': return 'Spanish';
+        case 'fr': return 'French';
+        default: return lang.toUpperCase();
+      }
+    });
+
+    return `I need you to analyze and translate the following hardcoded strings found in a web application:
+
+TARGET LANGUAGES: ${languageNames.join(', ')} (codes: ${targetLanguages.join(', ')})
+
+For each string, please:
+1. Detect the source language (en/it/de/es/fr)
+2. Provide translations to all target languages
+3. Ensure translations are appropriate for UI/web application context
+
+STRINGS TO TRANSLATE:
+
+${strings.map((str, index) => `
+${index + 1}. TEXT: "${str.text}"
+   CONTEXT: ${str.context}
+   SUGGESTED KEY: ${str.suggestedKey}
+   FOUND IN: ${str.files}
+`).join('')}
+
+Please respond in JSON format:
+{
+  "results": [
+    {
+      "originalText": "string text here",
+      "detectedLanguage": "en",
+      "translations": {
+        "en": "English translation",
+        "it": "Italian translation",
+        "de": "German translation",
+        "es": "Spanish translation",
+        "fr": "French translation"
+      },
+      "suggestedKey": "component.element.action"
+    }
+  ]
+}`;
   }
 
   async run() {

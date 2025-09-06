@@ -2,12 +2,26 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import { glob } from 'fast-glob';
 import { KeyRenameSuggestion } from '@/types/index.js';
+import { HardcodedString } from './key-detector.js';
 
 export interface CodemodOptions {
   renames: KeyRenameSuggestion[];
   globs: string[];
   resourceDirs: string[];
   confirmLowConfidence: boolean;
+  backup: boolean;
+}
+
+export interface StringReplacementOptions {
+  hardcodedStrings: HardcodedString[];
+  translationResults: Array<{
+    originalText: string;
+    detectedLanguage: string;
+    suggestedKey: string;
+    translations: Record<string, string>;
+  }>;
+  frameworks: string[];
+  globs: string[];
   backup: boolean;
 }
 
@@ -357,5 +371,226 @@ export class CodemodManager {
     }
     
     return result;
+  }
+
+  async replaceHardcodedStrings(options: StringReplacementOptions): Promise<CodemodResult> {
+    const { hardcodedStrings, translationResults, frameworks, globs, backup } = options;
+    
+    const result: CodemodResult = {
+      changes: [],
+      conflicts: [],
+      skipped: [],
+      summary: {
+        filesChanged: 0,
+        keysRenamed: 0,
+        backupsCreated: 0,
+      },
+    };
+
+    // Create mapping from original text to translation result
+    const translationMap = new Map<string, typeof translationResults[0]>();
+    for (const translation of translationResults) {
+      translationMap.set(translation.originalText, translation);
+    }
+
+    console.error(`Processing ${hardcodedStrings.length} hardcoded strings for replacement...`);
+
+    // Group strings by file for efficient processing
+    const fileMap = new Map<string, HardcodedString[]>();
+    for (const str of hardcodedStrings) {
+      for (const fileUsage of str.files) {
+        if (!fileMap.has(fileUsage.path)) {
+          fileMap.set(fileUsage.path, []);
+        }
+        fileMap.get(fileUsage.path)!.push(str);
+      }
+    }
+
+    // Process each file
+    for (const [filePath, strings] of fileMap) {
+      try {
+        const fileResult = await this.processFileForStringReplacement(
+          filePath,
+          strings,
+          translationMap,
+          frameworks,
+          backup
+        );
+
+        if (fileResult.changes.length > 0) {
+          result.changes.push(fileResult);
+          result.summary.filesChanged++;
+          result.summary.keysRenamed += fileResult.changes.length;
+        }
+      } catch (error) {
+        result.conflicts.push({
+          file: filePath,
+          reason: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    console.error(`String replacement complete: ${result.summary.filesChanged} files changed, ${result.summary.keysRenamed} strings replaced`);
+
+    return result;
+  }
+
+  private async processFileForStringReplacement(
+    filePath: string,
+    strings: HardcodedString[],
+    translationMap: Map<string, any>,
+    frameworks: string[],
+    backup: boolean
+  ): Promise<{ file: string; changes: Array<{ line: number; from: string; to: string }> }> {
+    const content = await fs.readFile(filePath, 'utf-8');
+    const lines = content.split('\n');
+    const changes: Array<{ line: number; from: string; to: string }> = [];
+    
+    let modifiedContent = content;
+    let hasChanges = false;
+
+    // Create backup if requested
+    if (backup) {
+      const backupPath = `${filePath}.backup.${Date.now()}`;
+      await fs.writeFile(backupPath, content, 'utf-8');
+    }
+
+    // Process each hardcoded string
+    for (const hardcodedString of strings) {
+      const translation = translationMap.get(hardcodedString.text);
+      if (!translation) continue;
+
+      // Generate i18n replacement based on file type and framework
+      const replacement = this.generateI18nReplacement(filePath, hardcodedString, translation, frameworks);
+      
+      if (!replacement) continue;
+
+      // Find and replace the hardcoded string
+      const escaped = this.escapeRegex(hardcodedString.text);
+      const patterns = this.getHardcodedStringPatterns(filePath, escaped);
+
+      for (const pattern of patterns) {
+        const regex = new RegExp(pattern, 'g');
+        const testRegex = new RegExp(pattern, 'g');
+        if (testRegex.test(modifiedContent)) {
+          const beforeReplace = modifiedContent;
+          modifiedContent = modifiedContent.replace(regex, replacement);
+          
+          if (modifiedContent !== beforeReplace) {
+            // Find the line number for reporting
+            const lineNumber = hardcodedString.files.find(f => f.path === filePath)?.line || 0;
+            
+            changes.push({
+              line: lineNumber,
+              from: hardcodedString.text,
+              to: replacement,
+            });
+            
+            hasChanges = true;
+            break; // Only apply the first matching pattern
+          }
+        }
+      }
+    }
+
+    // Write the modified file
+    if (hasChanges) {
+      await fs.writeFile(filePath, modifiedContent, 'utf-8');
+    }
+
+    return {
+      file: filePath,
+      changes,
+    };
+  }
+
+  private generateI18nReplacement(
+    filePath: string,
+    hardcodedString: HardcodedString,
+    translation: any,
+    frameworks: string[]
+  ): string | null {
+    const ext = path.extname(filePath);
+    const suggestedKey = translation.suggestedKey;
+
+    // Vue.js patterns
+    if (ext === '.vue' && frameworks.includes('vue3')) {
+      if (hardcodedString.context === 'vue-template') {
+        return `{{ $t('${suggestedKey}') }}`;
+      } else if (hardcodedString.context === 'string-literal') {
+        return `$t('${suggestedKey}')`;
+      }
+    }
+
+    // React/React Native patterns
+    if (['.tsx', '.jsx'].includes(ext) && frameworks.includes('react-native')) {
+      if (hardcodedString.context === 'jsx-content') {
+        return `{t('${suggestedKey}')}`;
+      } else if (hardcodedString.context === 'string-literal') {
+        return `t('${suggestedKey}')`;
+      }
+    }
+
+    // TypeScript/JavaScript patterns
+    if (['.ts', '.tsx', '.js', '.jsx'].includes(ext)) {
+      // For alert, confirm, prompt
+      if (hardcodedString.context === 'alert-message') {
+        return `t('${suggestedKey}')`;
+      }
+      
+      // For attributes like placeholder, title
+      if (['placeholder', 'title-attribute'].includes(hardcodedString.context)) {
+        return `t('${suggestedKey}')`;
+      }
+      
+      // For general string literals
+      if (hardcodedString.context === 'string-literal') {
+        return `t('${suggestedKey}')`;
+      }
+    }
+
+    // Default fallback
+    return `t('${suggestedKey}')`;
+  }
+
+  private getHardcodedStringPatterns(filePath: string, escapedText: string): string[] {
+    const ext = path.extname(filePath);
+    const patterns: string[] = [];
+
+    // Vue template patterns
+    if (ext === '.vue') {
+      patterns.push(
+        `>${escapedText}<`,           // Template content
+        `'${escapedText}'`,           // Single quoted strings
+        `"${escapedText}"`,           // Double quoted strings
+        `\`${escapedText}\``,         // Template literals
+        `placeholder\\s*=\\s*['"\`]${escapedText}['"\`]`,  // Placeholder attributes
+        `title\\s*=\\s*['"\`]${escapedText}['"\`]`         // Title attributes
+      );
+    }
+
+    // React/JSX patterns
+    if (['.tsx', '.jsx'].includes(ext)) {
+      patterns.push(
+        `>${escapedText}<`,           // JSX content
+        `'${escapedText}'`,           // Single quoted strings
+        `"${escapedText}"`,           // Double quoted strings
+        `\`${escapedText}\``,         // Template literals
+      );
+    }
+
+    // General JavaScript/TypeScript patterns
+    if (['.ts', '.tsx', '.js', '.jsx'].includes(ext)) {
+      patterns.push(
+        `alert\\s*\\(\\s*['"\`]${escapedText}['"\`]\\s*\\)`,     // Alert calls
+        `confirm\\s*\\(\\s*['"\`]${escapedText}['"\`]\\s*\\)`,   // Confirm calls
+        `prompt\\s*\\(\\s*['"\`]${escapedText}['"\`]\\s*\\)`,    // Prompt calls
+        `'${escapedText}'`,                                        // Single quoted
+        `"${escapedText}"`,                                        // Double quoted
+        `\`${escapedText}\``,                                      // Template literals
+      );
+    }
+
+    return patterns;
   }
 }
