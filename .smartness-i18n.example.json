@@ -1,0 +1,80 @@
+{
+  "projectName": "Smartness Project",
+  "apiToken": "",
+  "projectId": "",
+  "projectSlug": "",
+  "sourceLang": "en",
+  "targetLangs": ["de", "es", "fr", "it"],
+  "frameworks": ["vue3", "nuxt3", "react-native"],
+  "keyStyle": "dot",
+  "paths": {
+    "include": [
+      "src/**/*.vue",
+      "src/**/*.ts",
+      "src/**/*.tsx",
+      "src/**/*.js",
+      "src/**/*.jsx",
+      "pages/**/*.vue",
+      "components/**/*.vue",
+      "layouts/**/*.vue"
+    ],
+    "exclude": [
+      "node_modules/**",
+      "dist/**",
+      "build/**",
+      ".next/**",
+      ".nuxt/**",
+      "coverage/**",
+      "storybook-static/**"
+    ]
+  },
+  "namespaceRules": {
+    "prefix": "",
+    "maxDepth": 4,
+    "stopWords": ["the", "and", "or", "but", "is", "are", "was", "were", "a", "an"]
+  },
+  "resources": {
+    "vue3": {
+      "format": "json",
+      "outDir": "src/i18n/locales",
+      "bundleSplit": "per-lang"
+    },
+    "nuxt3": {
+      "format": "json", 
+      "outDir": "locales",
+      "bundleSplit": "per-lang"
+    },
+    "react-native": {
+      "format": "json",
+      "outDir": "src/locales", 
+      "bundleSplit": "per-lang"
+    }
+  },
+  "repositories": [
+    {
+      "name": "smartchat-webapp",
+      "path": "../smartchat-webapp",
+      "framework": "vue3"
+    },
+    {
+      "name": "sp-product-frontend", 
+      "path": "../sp-product-frontend",
+      "framework": "nuxt3"
+    },
+    {
+      "name": "smartness-chat-mobile",
+      "path": "../smartness-chat-mobile", 
+      "framework": "react-native"
+    }
+  ],
+  "integrations": {
+    "slack": {
+      "webhook": "",
+      "channel": "#i18n-updates"
+    },
+    "github": {
+      "createPRs": false,
+      "reviewers": []
+    }
+  }
+}
